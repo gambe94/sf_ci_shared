@@ -1,0 +1,290 @@
+name: 'Setup Salesforce Environment'
+description: 'Sets up Node.js, Salesforce CLI, and plugins for Salesforce CI/CD workflows'
+author: 'Your Organization DevOps Team'
+
+inputs:
+  node-version:
+    description: 'Node.js version to install'
+    required: false
+    default: '18'
+  sf-cli-version:
+    description: 'Salesforce CLI version to install (latest, or specific version like 2.15.9)'
+    required: false
+    default: 'latest'
+  plugins:
+    description: 'Comma-separated list of SF CLI plugins to install'
+    required: false
+    default: '@salesforce/sfdx-scanner,@salesforce/plugin-packaging,@salesforce/plugin-data,@salesforce/plugin-apex,@salesforce/plugin-source'
+  cache-dependencies:
+    description: 'Whether to cache Node.js dependencies and SF CLI'
+    required: false
+    default: 'true'
+  install-dependencies:
+    description: 'Whether to run npm install if package.json exists'
+    required: false
+    default: 'true'
+  working-directory:
+    description: 'Working directory for npm operations'
+    required: false
+    default: '.'
+
+outputs:
+  node-version:
+    description: 'Installed Node.js version'
+    value: ${{ steps.node-info.outputs.version }}
+  sf-cli-version:
+    description: 'Installed Salesforce CLI version'
+    value: ${{ steps.sf-info.outputs.version }}
+  plugins-installed:
+    description: 'List of installed SF CLI plugins'
+    value: ${{ steps.plugins-info.outputs.plugins }}
+  cache-hit:
+    description: 'Whether dependencies were restored from cache'
+    value: ${{ steps.cache-node.outputs.cache-hit }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate Inputs
+      shell: bash
+      run: |
+        echo "🔍 Validating inputs..."
+        
+        # Validate Node.js version format
+        if ! echo "${{ inputs.node-version }}" | grep -E '^[0-9]+(\.[0-9]+)?(\.[0-9]+)?$|^latest$|^lts$'; then
+          echo "❌ Invalid Node.js version format: ${{ inputs.node-version }}"
+          echo "Valid formats: 18, 18.17, 18.17.1, latest, lts"
+          exit 1
+        fi
+        
+        # Validate SF CLI version format
+        if ! echo "${{ inputs.sf-cli-version }}" | grep -E '^[0-9]+(\.[0-9]+)?(\.[0-9]+)?$|^latest$'; then
+          echo "❌ Invalid SF CLI version format: ${{ inputs.sf-cli-version }}"
+          echo "Valid formats: 2.15.9, latest"
+          exit 1
+        fi
+        
+        # Validate working directory exists
+        if [ ! -d "${{ inputs.working-directory }}" ]; then
+          echo "❌ Working directory does not exist: ${{ inputs.working-directory }}"
+          exit 1
+        fi
+        
+        echo "✅ Input validation passed"
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: ${{ inputs.cache-dependencies == 'true' && 'npm' || '' }}
+        cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+    - name: Get Node.js Version Info
+      id: node-info
+      shell: bash
+      run: |
+        NODE_VERSION=$(node --version)
+        NPM_VERSION=$(npm --version)
+        echo "version=$NODE_VERSION" >> $GITHUB_OUTPUT
+        echo "npm-version=$NPM_VERSION" >> $GITHUB_OUTPUT
+        echo "📦 Node.js: $NODE_VERSION, npm: $NPM_VERSION"
+
+    - name: Cache Node Dependencies
+      if: inputs.cache-dependencies == 'true'
+      id: cache-node
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ inputs.working-directory }}/node_modules
+          ~/.npm
+        key: ${{ runner.os }}-node-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+        restore-keys: |
+          ${{ runner.os }}-node-
+
+    - name: Install Node Dependencies
+      if: inputs.install-dependencies == 'true' && steps.cache-node.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -f "package-lock.json" ]; then
+          echo "📦 Installing dependencies with npm ci..."
+          npm ci
+        elif [ -f "package.json" ]; then
+          echo "📦 Installing dependencies with npm install..."
+          npm install
+        else
+          echo "ℹ️ No package.json found, skipping npm install"
+        fi
+
+    - name: Cache Salesforce CLI
+      if: inputs.cache-dependencies == 'true'
+      id: cache-sf-cli
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.local/share/sf
+          ~/.cache/sf
+          /usr/local/lib/node_modules/@salesforce/cli
+        key: ${{ runner.os }}-sf-cli-${{ inputs.sf-cli-version }}-${{ hashFiles(inputs.plugins) }}
+        restore-keys: |
+          ${{ runner.os }}-sf-cli-${{ inputs.sf-cli-version }}-
+          ${{ runner.os }}-sf-cli-
+
+    - name: Install Salesforce CLI
+      if: steps.cache-sf-cli.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        echo "🚀 Installing Salesforce CLI version: ${{ inputs.sf-cli-version }}"
+        
+        if [ "${{ inputs.sf-cli-version }}" = "latest" ]; then
+          npm install --global @salesforce/cli@latest
+        else
+          npm install --global @salesforce/cli@${{ inputs.sf-cli-version }}
+        fi
+        
+        echo "✅ Salesforce CLI installation completed"
+
+    - name: Verify Salesforce CLI Installation
+      id: sf-info
+      shell: bash
+      run: |
+        echo "🔍 Verifying Salesforce CLI installation..."
+        
+        # Get SF CLI version
+        SF_VERSION=$(sf version --verbose --json | jq -r '.cliVersion' 2>/dev/null || sf version | head -1)
+        echo "version=$SF_VERSION" >> $GITHUB_OUTPUT
+        
+        # Display version info
+        echo "⚡ Salesforce CLI: $SF_VERSION"
+        sf version --verbose
+
+    - name: Install SF CLI Plugins
+      if: inputs.plugins != ''
+      shell: bash
+      run: |
+        echo "🔌 Installing Salesforce CLI plugins..."
+        
+        # Convert comma-separated list to array
+        IFS=',' read -ra PLUGINS <<< "${{ inputs.plugins }}"
+        
+        INSTALLED_PLUGINS=()
+        FAILED_PLUGINS=()
+        
+        for plugin in "${PLUGINS[@]}"; do
+          # Trim whitespace
+          plugin=$(echo "$plugin" | xargs)
+          
+          if [ -n "$plugin" ]; then
+            echo "📦 Installing plugin: $plugin"
+            
+            # Try to install plugin with timeout and retry
+            for attempt in 1 2 3; do
+              if timeout 300 sf plugins install "$plugin" 2>&1; then
+                echo "✅ Successfully installed: $plugin"
+                INSTALLED_PLUGINS+=("$plugin")
+                break
+              else
+                echo "⚠️ Attempt $attempt failed for plugin: $plugin"
+                if [ $attempt -eq 3 ]; then
+                  echo "❌ Failed to install after 3 attempts: $plugin"
+                  FAILED_PLUGINS+=("$plugin")
+                else
+                  echo "🔄 Retrying in 10 seconds..."
+                  sleep 10
+                fi
+              fi
+            done
+          fi
+        done
+        
+        # Report results
+        echo ""
+        echo "📊 Plugin Installation Summary:"
+        echo "✅ Successfully installed (${#INSTALLED_PLUGINS[@]}): ${INSTALLED_PLUGINS[*]}"
+        
+        if [ ${#FAILED_PLUGINS[@]} -gt 0 ]; then
+          echo "❌ Failed to install (${#FAILED_PLUGINS[@]}): ${FAILED_PLUGINS[*]}"
+          
+          # Create step summary
+          {
+            echo "## ⚠️ Plugin Installation Issues"
+            echo "Some plugins failed to install:"
+            for plugin in "${FAILED_PLUGINS[@]}"; do
+              echo "- ❌ $plugin"
+            done
+            echo ""
+            echo "This may be due to network issues or plugin compatibility."
+            echo "The workflow will continue, but some functionality may be limited."
+          } >> $GITHUB_STEP_SUMMARY
+          
+          # Don't fail the step, just warn
+          echo "::warning::Some plugins failed to install: ${FAILED_PLUGINS[*]}"
+        fi
+
+    - name: Get Installed Plugins Info
+      id: plugins-info
+      shell: bash
+      run: |
+        echo "📋 Getting installed plugins information..."
+        
+        # Get list of installed plugins
+        PLUGINS_JSON=$(sf plugins --json 2>/dev/null || echo '[]')
+        PLUGINS_LIST=$(echo "$PLUGINS_JSON" | jq -r '.[].name' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+        
+        echo "plugins=$PLUGINS_LIST" >> $GITHUB_OUTPUT
+        
+        # Display installed plugins
+        echo "🔌 Installed plugins:"
+        if command -v sf plugins &> /dev/null; then
+          sf plugins --core
+        else
+          echo "Unable to list plugins"
+        fi
+
+    - name: Verify Installation
+      shell: bash
+      run: |
+        echo "🧪 Running final verification..."
+        
+        # Test basic SF CLI functionality
+        echo "Testing SF CLI basic commands..."
+        sf --help > /dev/null
+        sf version > /dev/null
+        
+        # Test plugin functionality (non-critical)
+        echo "Testing plugin availability..."
+        sf plugins --core > /dev/null || echo "⚠️ Plugin listing unavailable"
+        
+        echo "✅ Installation verification completed successfully"
+
+    - name: Create Installation Summary
+      shell: bash
+      run: |
+        {
+          echo "## 🚀 Salesforce Environment Setup Complete"
+          echo ""
+          echo "| Component | Version |"
+          echo "|-----------|---------|"
+          echo "| Node.js | ${{ steps.node-info.outputs.version }} |"
+          echo "| Salesforce CLI | ${{ steps.sf-info.outputs.version }} |"
+          echo "| Cache Hit | ${{ steps.cache-node.outputs.cache-hit == 'true' && '✅ Yes' || '❌ No' }} |"
+          echo ""
+          echo "### 🔌 Installed Plugins"
+          if [ -n "${{ steps.plugins-info.outputs.plugins }}" ]; then
+            IFS=',' read -ra PLUGINS <<< "${{ steps.plugins-info.outputs.plugins }}"
+            for plugin in "${PLUGINS[@]}"; do
+              echo "- ✅ $plugin"
+            done
+          else
+            echo "- ℹ️ No plugins installed"
+          fi
+          echo ""
+          echo "### ⚙️ Configuration"
+          echo "- Working Directory: \`${{ inputs.working-directory }}\`"
+          echo "- Dependencies Cached: ${{ inputs.cache-dependencies }}"
+          echo "- Auto Install Dependencies: ${{ inputs.install-dependencies }}"
+        } >> $GITHUB_STEP_SUMMARY
+
+branding:
+  icon: 'package'
+  color: 'blue'
