@@ -16,7 +16,7 @@ inputs:
     required: false
     default: '@salesforce/sfdx-scanner,@salesforce/plugin-packaging,@salesforce/plugin-data,@salesforce/plugin-apex,@salesforce/plugin-source'
   cache-dependencies:
-    description: 'Whether to cache Node.js dependencies and SF CLI'
+    description: 'Whether to cache Node.js dependencies'
     required: false
     default: 'true'
   install-dependencies:
@@ -116,22 +116,7 @@ runs:
           echo "ℹ️ No package.json found, skipping npm install"
         fi
 
-    - name: Cache Salesforce CLI
-      if: inputs.cache-dependencies == 'true'
-      id: cache-sf-cli
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.local/share/sf
-          ~/.cache/sf
-          /usr/local/lib/node_modules/@salesforce/cli
-        key: ${{ runner.os }}-sf-cli-${{ inputs.sf-cli-version }}-${{ hashFiles(inputs.plugins) }}
-        restore-keys: |
-          ${{ runner.os }}-sf-cli-${{ inputs.sf-cli-version }}-
-          ${{ runner.os }}-sf-cli-
-
     - name: Install Salesforce CLI
-      if: steps.cache-sf-cli.outputs.cache-hit != 'true'
       shell: bash
       run: |
         echo "🚀 Installing Salesforce CLI version: ${{ inputs.sf-cli-version }}"
@@ -267,7 +252,7 @@ runs:
           echo "|-----------|---------|"
           echo "| Node.js | ${{ steps.node-info.outputs.version }} |"
           echo "| Salesforce CLI | ${{ steps.sf-info.outputs.version }} |"
-          echo "| Cache Hit | ${{ steps.cache-node.outputs.cache-hit == 'true' && '✅ Yes' || '❌ No' }} |"
+          echo "| Node Cache Hit | ${{ steps.cache-node.outputs.cache-hit == 'true' && '✅ Yes' || '❌ No' }} |"
           echo ""
           echo "### 🔌 Installed Plugins"
           if [ -n "${{ steps.plugins-info.outputs.plugins }}" ]; then
