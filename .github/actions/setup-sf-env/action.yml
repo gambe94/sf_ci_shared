@@ -24,7 +24,7 @@ inputs:
   plugins:
     description: 'Comma-separated list of SF CLI plugins to install'
     required: false
-    default: '@salesforce/sfdx-scanner,@salesforce/plugin-packaging,@salesforce/plugin-data,@salesforce/plugin-apex,@salesforce/plugin-source'
+    default: ''
   cache-dependencies:
     description: 'Whether to cache Node.js dependencies'
     required: false
@@ -158,9 +158,18 @@ runs:
         echo "Salesforce CLI: $SF_VERSION"
 
     - name: Install SF CLI Plugins
-      if: inputs.plugins != ''
+      id: install-plugins
       shell: bash
       run: |
+        # Initialize outputs
+        echo "installed-plugins=" >> $GITHUB_OUTPUT
+        echo "failed-plugins=" >> $GITHUB_OUTPUT
+        
+        # Skip if no plugins specified
+        if [ -z "${{ inputs.plugins }}" ]; then
+          echo "No plugins specified"
+          exit 0
+        fi
         echo "Installing plugins..."
         
         # Convert comma-separated list to array
@@ -193,7 +202,13 @@ runs:
           fi
         done
         
-        # Report results
+        # Report results and set outputs
+        INSTALLED_LIST=$(IFS=','; echo "${INSTALLED_PLUGINS[*]}")
+        FAILED_LIST=$(IFS=','; echo "${FAILED_PLUGINS[*]}")
+        
+        echo "installed-plugins=$INSTALLED_LIST" >> $GITHUB_OUTPUT
+        echo "failed-plugins=$FAILED_LIST" >> $GITHUB_OUTPUT
+        
         if [ ${#INSTALLED_PLUGINS[@]} -gt 0 ]; then
           echo "Installed: ${INSTALLED_PLUGINS[*]}"
         fi
@@ -207,11 +222,9 @@ runs:
       id: plugins-info
       shell: bash
       run: |
-        # Get list of installed plugins
-        PLUGINS_JSON=$(sf plugins --json 2>/dev/null || echo '[]')
-        PLUGINS_LIST=$(echo "$PLUGINS_JSON" | jq -r '.[].name' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-        
-        echo "plugins=$PLUGINS_LIST" >> $GITHUB_OUTPUT
+        # Get the plugin lists from the installation step
+        echo "plugins=${{ steps.install-plugins.outputs.installed-plugins }}" >> $GITHUB_OUTPUT
+        echo "failed-plugins=${{ steps.install-plugins.outputs.failed-plugins }}" >> $GITHUB_OUTPUT
 
     - name: ⏱️ Calculate Setup Duration
       shell: bash
@@ -259,14 +272,26 @@ runs:
           echo "| Salesforce CLI | ${{ steps.sf-info.outputs.version }} |"
           echo "| Node Cache Hit | ${{ steps.cache-node.outputs.cache-hit == 'true' && '✅ Yes' || '❌ No' }} |"
           echo ""
-          echo "### 🔌 Installed Plugins"
-          if [ -n "${{ steps.plugins-info.outputs.plugins }}" ]; then
-            IFS=',' read -ra PLUGINS <<< "${{ steps.plugins-info.outputs.plugins }}"
-            for plugin in "${PLUGINS[@]}"; do
-              echo "- ✅ $plugin"
-            done
+          echo "### 🔌 Plugin Installation"
+          if [ -n "${{ inputs.plugins }}" ]; then
+            echo "**Requested:** ${{ inputs.plugins }}"
+            echo ""
+            if [ -n "${{ steps.plugins-info.outputs.plugins }}" ]; then
+              echo "**✅ Installed:**"
+              IFS=',' read -ra PLUGINS <<< "${{ steps.plugins-info.outputs.plugins }}"
+              for plugin in "${PLUGINS[@]}"; do
+                echo "- $plugin"
+              done
+            fi
+            if [ -n "${{ steps.plugins-info.outputs.failed-plugins }}" ]; then
+              echo "**❌ Failed:**"
+              IFS=',' read -ra FAILED <<< "${{ steps.plugins-info.outputs.failed-plugins }}"
+              for plugin in "${FAILED[@]}"; do
+                echo "- $plugin"
+              done
+            fi
           else
-            echo "- ℹ️ No plugins installed"
+            echo "- ℹ️ No plugins requested"
           fi
           echo ""
           echo "### ⚙️ Configuration"
